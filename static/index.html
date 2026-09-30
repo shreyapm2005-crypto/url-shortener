@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shortly</title>
+<style>
+:root{--bg:#f7f7f5;--card:#fff;--fg:#1c1c1a;--mut:#6b6b66;--ac:#0f6e56;--bd:#e2e2dd;--err:#b3261e}
+@media(prefers-color-scheme:dark){:root{--bg:#161615;--card:#211f1e;--fg:#f0efe9;--mut:#9a9a92;--ac:#4fc3a1;--bd:#34332f;--err:#f2867e}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif}
+main{max-width:760px;margin:0 auto;padding:20px 16px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:16px;margin-bottom:16px}
+input,button{font:inherit;padding:10px 12px;border-radius:8px;border:1px solid var(--bd);background:var(--bg);color:var(--fg);width:100%;margin-bottom:8px}
+button{background:var(--ac);color:#fff;border:0;cursor:pointer;font-weight:600}
+button.ghost{background:none;color:var(--ac);border:1px solid var(--bd);width:auto;padding:4px 10px;margin:0 4px 0 0}
+.row{display:flex;gap:8px;flex-wrap:wrap}.row input{flex:1;min-width:140px}
+.link{border-top:1px solid var(--bd);padding:10px 0;word-break:break-all}.link:first-child{border:0}
+.mut{color:var(--mut);font-size:14px}.err{color:var(--err);font-size:14px;min-height:20px}
+header{display:flex;justify-content:space-between;align-items:center}h1{font-size:22px;margin:0 0 16px}
+</style>
+</head>
+<body>
+<main>
+<header><h1>🔗 Shortly</h1><button class="ghost" id="out" hidden>Log out</button></header>
+
+<section id="authBox" class="card">
+  <input id="email" type="email" placeholder="Email" autocomplete="email">
+  <input id="pw" type="password" placeholder="Password (8+ chars)" autocomplete="current-password">
+  <div class="row"><button onclick="auth('login')">Log in</button><button onclick="auth('register')">Sign up</button></div>
+  <div class="err" id="authErr"></div>
+</section>
+
+<section id="app" hidden>
+  <div class="card">
+    <input id="url" type="url" placeholder="Paste a long URL">
+    <div class="row"><input id="alias" placeholder="Custom alias (optional)"><input id="exp" type="date" title="Expires (optional)"></div>
+    <button onclick="create()">Shorten</button>
+    <div class="err" id="err"></div>
+  </div>
+  <div class="card"><div id="list" class="mut">No links yet.</div></div>
+  <div class="card" id="stats" hidden></div>
+  <div class="card" id="admin" hidden></div>
+</section>
+</main>
+
+<script>
+let token = localStorage.getItem('t');
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function api(path, method = 'GET', body) {
+  const r = await fetch('/api/v1' + path, {
+    method, headers: { 'Content-Type': 'application/json', ...(token && { Authorization: 'Bearer ' + token }) },
+    body: body && JSON.stringify(body)
+  });
+  const data = r.status === 204 ? null : await r.json();
+  if (!r.ok) { if (r.status === 401 && token) logout(); throw new Error(data?.error || 'Request failed'); }
+  return data;
+}
+
+async function auth(kind) {
+  try {
+    const d = await api('/auth/' + kind, 'POST', { email: $('email').value, password: $('pw').value });
+    token = d.token; localStorage.setItem('t', token); show();
+  } catch (e) { $('authErr').textContent = e.message; }
+}
+function logout() { token = null; localStorage.removeItem('t'); show(); }
+$('out').onclick = logout;
+
+async function create() {
+  $('err').textContent = '';
+  try {
+    await api('/links', 'POST', { url: $('url').value, alias: $('alias').value || undefined, expiresAt: $('exp').value || undefined });
+    $('url').value = $('alias').value = $('exp').value = ''; load();
+  } catch (e) { $('err').textContent = e.message; }
+}
+
+async function load() {
+  const links = await api('/links');
+  $('list').innerHTML = links.length ? links.map(l => `
+    <div class="link"><a href="${esc(l.shortUrl)}" target="_blank">${esc(l.shortUrl)}</a>
+    <div class="mut">${esc(l.url)}</div>
+    <div class="mut">${l.clicks} clicks${l.expires_at ? ' · expires ' + new Date(l.expires_at).toLocaleDateString() : ''}</div>
+    <button class="ghost" onclick="copy('${esc(l.shortUrl)}')">Copy</button>
+    <button class="ghost" onclick="stats(${l.id})">Stats</button>
+    <button class="ghost" onclick="del(${l.id})">Delete</button></div>`).join('') : 'No links yet.';
+  admin();
+}
+const copy = t => navigator.clipboard.writeText(t);
+async function del(id) { if (confirm('Delete this link?')) { await api('/links/' + id, 'DELETE'); $('stats').hidden = true; load(); } }
+async function stats(id) {
+  const s = await api(`/links/${id}/stats`);
+  const list = a => a.length ? a.map(x => `<div>${esc(x.name || x.day)} — ${x.count}</div>`).join('') : '<div class="mut">No data</div>';
+  $('stats').hidden = false;
+  $('stats').innerHTML = `<b>${esc(s.link.shortUrl)}</b> — ${s.totalClicks} total clicks
+    <h4>Referrers</h4>${list(s.referrers)}<h4>Countries</h4>${list(s.countries)}<h4>Last 30 days</h4>${list(s.daily)}`;
+}
+
+async function admin() {
+  try {
+    const me = await api('/auth/me');
+    $('admin').hidden = !me.isAdmin;
+    if (!me.isAdmin) return;
+    const o = await api('/admin/overview');
+    $('admin').innerHTML = `<b>Admin dashboard</b><div class="mut">${o.users} users · ${o.links} links · ${o.clicks} clicks</div>` +
+      o.allLinks.map(l => `<div class="link"><a href="${esc(l.shortUrl)}" target="_blank">${esc(l.code)}</a>
+        <span class="mut">${esc(l.owner || 'anonymous')} · ${l.clicks} clicks</span><div class="mut">${esc(l.url)}</div>
+        <button class="ghost" onclick="adel(${l.id})">Remove</button></div>`).join('');
+  } catch (e) {}
+}
+async function adel(id) { if (confirm('Remove this link?')) { await api('/admin/links/' + id, 'DELETE'); load(); } }
+
+function show() {
+  $('authBox').hidden = !!token; $('app').hidden = !token; $('out').hidden = !token;
+  if (token) load().catch(() => {});
+}
+show();
+</script>
+</body>
+</html>
